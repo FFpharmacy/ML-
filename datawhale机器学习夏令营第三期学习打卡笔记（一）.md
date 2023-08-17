@@ -12,6 +12,13 @@
    赛题数据由约62万条训练集、20万条测试集数据组成，共包含13个字段。
    其中uuid为样本唯一标识，eid为访问行为ID，udmap为行为属性，其中的key1到key9表示不同的行为属性，如项目名、项目id等相关字段，
    common_ts为应用访问记录发生时间（毫秒时间戳），其余字段x1至x8为用户相关的属性，为匿名处理字段。target字段为预测目标，即是否为新增用户。
+   
+   部分数据集展示
+   
+   <img width="856" alt="截屏2023-08-17 上午11 32 31" src="https://github.com/FFpharmacy/ML-/assets/142389885/cf677e7a-b20c-4f83-97a7-22d35fc5d3b0">
+
+   
+
 ### 2.评价指标
 
 本次竞赛的评价标准采用f1_score，分数越高，效果越好
@@ -19,6 +26,134 @@
 
 ### 3.解题思路
 总体来说是一个二分类任务，其中目标是根据用户的行为、属性以及访问时间等特征，预测该用户是否属于新增用户。
+
+基本流程为：
+![whiteboard_exported_image](https://github.com/FFpharmacy/ML-/assets/142389885/2b3c7bc6-1285-4ec4-aea4-a88bc0a3d907)
+--
+## baseline细节理解
+baseline的意思是基线，这个概念是作为算法提升的参照物而存在的相当于一个基础模型，可以以此为基准来比较对模型的改进是否有效。
+```
+# 1.调包 pandas 用于数据分析与数理；numpy 用于数值计算和多维数组操作； DecisionTreeClassifier决策树分类模型
+# 2.导入数据
+# 3.对数据进行统计性分析 （baseline中缺少）
+```
+```
+# 4.将 'udmap' 列进行 One-Hot 编码
+## 在 python 中, 形如 {'key1': 3, 'key2': 2} 格式的为字典类型对象, 通过key-value键值对的方式存储。而在本数据集中, udmap实际是以字符的形式存储, 所以处理时需要先用eval 函数将'udmap' 解析为字典。
+# 具体实现代码：
+# 定义函数 udmap_onethot，用于将 'udmap' 列进行 One-Hot 编码
+def udmap_onethot(d):
+    v = np.zeros(9)  # 创建一个长度为 9 的零数组
+    if d == 'unknown':  # 如果 'udmap' 的值是 'unknown'
+        return v  # 返回零数组
+    d = eval(d)  # 将 'udmap' 的值解析为一个字典
+    for i in range(1, 10):  # 遍历 'key1' 到 'key9', 注意, 这里不包括10本身
+        if 'key' + str(i) in d:  # 如果当前键存在于字典中
+            v[i - 1] = d['key' + str(i)]  # 将字典中的值存储在对应的索引位置上
+
+    return v  # 返回 One-Hot 编码后的数组
+
+```
+> eval函数:官方文档中的解释是，将字符串str当成有效的表达式来求值并返回计算结果。
+> range 不包括尾
+```
+# 使用 apply() 方法将 udmap_onethot 函数应用于每个样本的 'udmap' 列
+# np.vstack() 用于将结果堆叠成一个数组
+train_udmap_df = pd.DataFrame(np.vstack(train_data['udmap'].apply(udmap_onethot)))
+test_udmap_df = pd.DataFrame(np.vstack(test_data['udmap'].apply(udmap_onethot)))
+# 为新的特征 DataFrame 命名列名
+train_udmap_df.columns = ['key' + str(i) for i in range(1, 10)]
+test_udmap_df.columns = ['key' + str(i) for i in range(1, 10)]
+# 将编码后的 udmap 特征与原始数据进行拼接，沿着列方向拼接
+train_data = pd.concat([train_data, train_udmap_df], axis=1)
+test_data = pd.concat([test_data, test_udmap_df], axis=1)
+```
+```
+# 5. 编码 udmap 是否为空
+# 使用比较运算符将每个样本的 'udmap' 列与字符串 'unknown' 进行比较，返回一个布尔值的 Series
+# 使用 astype(int) 将布尔值转换为整数（0 或 1），以便进行后续的数值计算和分析
+train_data['udmap_isunknown'] = (train_data['udmap'] == 'unknown').astype(int)
+test_data['udmap_isunknown'] = (test_data['udmap'] == 'unknown').astype(int)
+```
+> 第五步不知道作用是什么
+
+```
+# 6. 提取 eid 的频次特征
+# 使用 map() 方法将每个样本的 eid 映射到训练数据中 eid 的频次计数
+# train_data['eid'].value_counts() 返回每个 eid 出现的频次计数
+train_data['eid_freq'] = train_data['eid'].map(train_data['eid'].value_counts())
+test_data['eid_freq'] = test_data['eid'].map(train_data['eid'].value_counts())
+```
+> 为什么会想到这一步
+```
+# 7. 提取 eid 的标签特征
+# 使用 groupby() 方法按照 eid 进行分组，然后计算每个 eid 分组的目标值均值
+# train_data.groupby('eid')['target'].mean() 返回每个 eid 分组的目标值均值
+train_data['eid_mean'] = train_data['eid'].map(train_data.groupby('eid')['target'].mean())
+test_data['eid_mean'] = test_data['eid'].map(train_data.groupby('eid')['target'].mean())
+```
+```
+# 8. 提取时间戳
+# 使用 pd.to_datetime() 函数将时间戳列转换为 datetime 类型
+# 样例：1678932546000->2023-03-15 15:14:16
+# 注: 需要注意时间戳的长度, 如果是13位则unit 为 毫秒, 如果是10位则为 秒, 这是转时间戳时容易踩的坑
+# 具体实现代码：
+train_data['common_ts'] = pd.to_datetime(train_data['common_ts'], unit='ms')
+test_data['common_ts'] = pd.to_datetime(test_data['common_ts'], unit='ms')
+
+# 使用 dt.hour 属性从 datetime 列中提取小时信息，并将提取的小时信息存储在新的列 'common_ts_hour'
+train_data['common_ts_hour'] = train_data['common_ts'].dt.hour
+test_data['common_ts_hour'] = test_data['common_ts'].dt.hour
+```
+> 特征工程完成
+```
+# 9. 加载决策树模型进行训练(直接使用sklearn中导入的包进行模型建立)
+clf = DecisionTreeClassifier()
+# 使用 fit 方法训练模型
+# train_data.drop(['udmap', 'common_ts', 'uuid', 'target'], axis=1) 从训练数据集中移除列 'udmap', 'common_ts', 'uuid', 'target'
+# 这些列可能是特征或标签，取决于数据集的设置
+# train_data['target'] 是训练数据集中的标签列，它包含了每个样本的目标值
+clf.fit(
+    train_data.drop(['udmap', 'common_ts', 'uuid', 'target'], axis=1),  # 特征数据：移除指定的列作为特征
+    train_data['target']  # 目标数据：将 'target' 列作为模型的目标进行训练
+)
+```
+```
+# 9. 对测试集进行预测，并保存结果到result_df中
+# 创建一个DataFrame来存储预测结果，其中包括两列：'uuid' 和 'target'
+# 'uuid' 列来自测试数据集中的 'uuid' 列，'target' 列将用来存储模型的预测结果
+pd.DataFrame({
+    'uuid': test_data['uuid'],
+    'target': clf.predict(test_data.drop(['udmap', 'common_ts', 'uuid'], axis=1))
+}).to_csv('submit.csv', index=None)
+ # 使用模型 clf 对测试数据集进行预测，并将预测结果存储在 'target' 列中
+```
+## 思考
+### 1. 为什么这里使用机器学习，使用深度学习的效果会不会更好？
+
+数据量级在万，足够大；且特征有很多类别字段，这时机器学习结合特征工程会有不错的效果；深度学习在某种程度上可以自动学习特征，但对于特定问题，手动设计特征可能会更有效。
+
+### 2. 这里二分类任务是用逻辑回归模型还是决策树模型比较好？
+
+决策树能够处理非线性关系，并能自动捕获特征之间的交互作用。可以生成解释的规则，有助于理解模型如何做出决策。决策树能够处理不同类型的特征，包括分类和数值。
+
+### 3. 进行特征工程前应该对特征进行统计性分析！
+
+后期补坑
+
+### 4.如果将submit.csv提交到讯飞比赛页面，会有多少的分数？
+<img width="1006" alt="截屏2023-08-17 下午3 56 03" src="https://github.com/FFpharmacy/ML-/assets/142389885/69c14ced-ad43-4d69-8453-fd30160ced96">
+
+>为什么同样的程序不同时间跑出来的结果数据集不一样，也就是训练出的模型会有些许差别。
+
+### 5.代码中如何对udmp进行了人工的onehot？
+
+设定了一个函数，先是判断udmp是unknown还是有数值，如果为unknown，则赋予长度为9的零数组；如果为其他，则通过eval函数识别字典里的值和健，对应生成9列新特征。
+> eval函数怎么运行的，后期补坑。
+
+### 6.为什么要给eid特征进行频率计算和目标均值计算
+目标只有零和一，如果均值小说明新增不活跃，看这个指标mean可以发现新增和非新增数量很不平衡且指标mean和eid没有明显的趋势关系，不太清楚这个为什么创建这个指标。
+
 
    
    
